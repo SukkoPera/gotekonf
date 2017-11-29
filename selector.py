@@ -28,16 +28,6 @@ class Slot (object):
 		self.fileName = _fileName
 		self.diskFileName = _diskFileName
 
-def hexdump(src, length=16):
-    FILTER = ''.join([(len(repr(chr(x))) == 3) and chr(x) or '.' for x in range(256)])
-    lines = []
-    for c in xrange(0, len(src), length):
-        chars = src[c:c+length]
-        hex = ' '.join(["%02x" % ord(x) for x in chars])
-        printable = ''.join(["%s" % ((ord(x) <= 127 and FILTER[ord(x)]) or '.') for x in chars])
-        lines.append("%04x  %-*s  %s\n" % (c, length*3, hex, printable))
-    return ''.join(lines)
-
 class NotFoundInPathException (Exception):
 	def __init__ (self, exe):
 		self.exe = exe
@@ -93,7 +83,7 @@ class Fat32Filesystem (object):
 		"""path must be relative to device root"""
 		fn = filter (lambda f: f["name"] == path, self.files)
 		if len (fn) == 1:
-			ret = fn[0]["name"]
+			ret = fn[0]["cluster"]
 		else:
 			ret = None
 		return ret
@@ -112,7 +102,7 @@ class Selector (object):
 
 	def __init__ (self, _dev, _mntp):
 		self.dev = _dev
-		self.mntp = _mntp
+		self.mountpoint = _mntp
 		self.fs = Fat32Filesystem (_dev, _mntp)
 
 		self.adf = os.path.join (_mntp, "selector.adf")
@@ -185,6 +175,16 @@ class Selector (object):
 		else:
 			raise SelectorException ("Cannot set an empty slot as default")
 
+	# Updates slot cluster according to slot filename
+	def mapSlot (self, slot):
+		ret = False
+		if slot.diskFileName is not None and len (slot.diskFileName) > 0:
+			clu = self.fs.getStartingCluster (slot.diskFileName)
+			if clu is not None:
+				slot.startCluster = clu
+				ret = True
+		return ret
+
 	# Call this with a DICT (slot# -> slot)
 	def updateSlots (self, slots):
 		with open (self.adf, "rb+") as fp:
@@ -220,8 +220,7 @@ def checkSlots (mntp, slots, fix = True):
 			# full filename. Also the path is lost.
 			candidates = findFile (slot.fileName, mntp)
 			candidates = map (lambda f: f[len (mntp) + 1:], candidates)
-			print "File for slot %d is missing: %s" % (n, slot.fileName)
-			print "File for slot %d is missing: %s" % (n, slot.startCluster)
+			print "File for slot %d is missing: %s (c=%u)" % (n, slot.fileName, slot.startCluster)
 
 			# FIXME
 			if True or len (candidates) == 0:
@@ -266,28 +265,31 @@ def findFiles (pattern, root):
 		ret.extend (findFiles (pattern, d))
 	return ret
 
-def remap (dev, mntp):
-	adfs = findFiles ("*.adf", mntp)
+def remap (sel, verbose = False):
+	adfs = findFiles ("*.adf", sel.mountpoint)
 	adfs = filter (lambda f: os.path.basename (f).lower () != "selector.adf", adfs)
-	print "Found %d ADF files" % len (adfs)
+	print "Found %d ADF files:" % len (adfs)
 
 	slots = {}
 	for n, adf in enumerate (adfs, start = 1):
-		print "%2d. %s" % (n, adf)
-		relpath = os.path.relpath (adf, mntp)
+		relpath = os.path.relpath (adf, sel.mountpoint)
+		print "%2d. %s" % (n, relpath)
 		bn = os.path.basename (adf)
 		sz = os.path.getsize (adf)
-		clu = self.fs.getStartingCluster (dev, relpath)
-		assert clu is not None
-		slot = Slot (n, False, bn, clu, sz, bn, adf)
-		#~ print slot
+		slot = Slot (n, False, bn, 0x00, sz, bn, relpath)
+		mapped = sel.mapSlot (slot)
+		assert mapped, "Cannot find cluster for file '%s'" % adf
+		if verbose:
+			print "- Mapped to cluster %u" % slot.startCluster
 		slots[n] = slot
 
-	for n in range (len (adfs) + 1, Selector.MAX_SLOTS):
+	for n in range (len (adfs) + 1, Selector.MAX_SLOTS + 1):
 		slot = Slot (n, True, "", 0x00, 0, "", "")
 		slots[n] = slot
 
-	return slots
+	# Commit
+	assert len (slots) == Selector.MAX_SLOTS, len (slots)
+	s.updateSlots (slots)
 
 
 # Thanks tzot ;)
@@ -359,7 +361,10 @@ if args.verbose:
 
 if args.list:
 	for n, slot in s.slots.iteritems ():
-		print "%2d. %s" % (n, slot.diskFileName)
+		if args.verbose:
+			print "%2d. %s (c=%u)" % (n, slot.diskFileName, slot.cluster)
+		else:
+			print "%2d. %s" % (n, slot.diskFileName)
 elif args.check:
 	nProb = checkSlots (args.path, s.slots)
 	if nProb == 0:
@@ -368,8 +373,7 @@ elif args.check:
 		#~ for slot in s.slots.itervalues ():
 			#~ s.updateSlot (slot)
 elif args.remap:
-	slots = remap (dev, args.path)
-	s.updateSlots (slots)
+	remap (s, args.verbose)
 elif args.defaultImage:
 	n = int (args.defaultImage)
 	s.setDefaultSlot (n)

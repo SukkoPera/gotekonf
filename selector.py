@@ -13,7 +13,7 @@ from collections import namedtuple
 
 from fat import FAT
 
-Stats = namedtuple ('Stats', ['nImages', 'defaultSlot'])
+Stats = namedtuple ('Stats', ['nImages', 'defaultSlot', 'unk1', 'unk2', 'unk3', 'unk4'])
 
 # cleared is True if slot should be cleared
 # diskFileName is actual path relative to device root (or None if not found),
@@ -89,21 +89,13 @@ class Fat32Filesystem (object):
 			ret = None
 		return ret
 
-	@staticmethod
-	def getStartingCluster (dev, path):
+	def getStartingCluster (self, path):
 		"""path must be relative to device root"""
-		rx = r"f\s+(\S+)\s+(\S+)\s+(.+?)\s+c=(\d+)\s+s=(\d+)\s+\(\S+\)"
-
-		dn = os.path.dirname (path)
-		bn = os.path.basename (path)
-		cmd = ["fatcat", dev, "-l", dn]
-		#~ print "Running: %s" % str (cmd)
-		output = subprocess.check_output(cmd)
-		#~ print "Output is: %s" % output
-		rc = re.compile (rx)
-
-		ret = None
-
+		fn = filter (lambda f: f["name"] == path, self.files)
+		if len (fn) == 1:
+			ret = fn[0]["name"]
+		else:
+			ret = None
 		return ret
 
 class SelectorException (BaseException):
@@ -137,13 +129,7 @@ class Selector (object):
 		unk2 = data[3]	# Always 01?
 		unk3 = data[4]
 		unk4 = data[5]
-
-		print "Stat bytes:"
-		print "DEC:\t%d\t%d\t%d\t%d" % (unk1, unk2, unk3, unk4)
-		print "HEX:\t%02x\t%02x\t%02x\t%02x" % (unk1, unk2, unk3, unk4)
-		print
-
-		return Stats (nImages, defaultSlot)
+		return Stats (nImages, defaultSlot, unk1, unk2, unk3, unk4)
 
 	def _getSlotOffset (self, n):
 		return Selector.REC_OFFSET + (n - 1) * Selector.REC_SIZE
@@ -186,10 +172,9 @@ class Selector (object):
 
 	def scan (self):
 		with open (self.adf, "rb") as fp:
-			self.defaultSlot = self._getStats (fp).defaultSlot
+			self.stats = self._getStats (fp)
+			self.defaultSlot = self.stats.defaultSlot
 			self.slots = self._getSlots (fp)
-			print "Slots in use: %d" % len (self.slots)
-			print "Default slot: %d" % self.defaultSlot
 
 	def setDefaultSlot (self, slotNo):
 		if slotNo in self.slots:
@@ -200,19 +185,7 @@ class Selector (object):
 		else:
 			raise SelectorException ("Cannot set an empty slot as default")
 
-	def updateSlot (self, slot):
-		if slot.cleared:
-			buf = struct.pack ("< 128B", *([0] * Selector.REC_SIZE))
-		else:
-			# struct.pack() will take care of padding and or shortening long/short strings
-			buf = struct.pack (Selector._SLOT_STRUCT, slot.shortName, 0, 0, slot.startCluster, slot.fileSize, slot.fileName, *([0] * 66))
-		offset = self._getSlotOffset (slot.num)
-		with open (self.adf, "rb+") as fp:
-			fp.seek (offset)
-			fp.write (buf)
-		self.slots[slot.num] = slot
-
-	# Call this with a DICT of slots
+	# Call this with a DICT (slot# -> slot)
 	def updateSlots (self, slots):
 		with open (self.adf, "rb+") as fp:
 			fp.seek (Selector.REC_OFFSET)
@@ -304,7 +277,7 @@ def remap (dev, mntp):
 		relpath = os.path.relpath (adf, mntp)
 		bn = os.path.basename (adf)
 		sz = os.path.getsize (adf)
-		clu = Fat32Filesystem.getStartingCluster (dev, relpath)
+		clu = self.fs.getStartingCluster (dev, relpath)
 		assert clu is not None
 		slot = Slot (n, False, bn, clu, sz, bn, adf)
 		#~ print slot
@@ -343,6 +316,7 @@ parser.add_argument ('--check', "-c", action = 'store_true', default = False, he
 parser.add_argument ('--remap', "-r", action = 'store_true', default = False, help = "Remap all disk images to slots")
 parser.add_argument ('--set-default', "-d", metavar = "IMAGE_NO", default = None, dest = "defaultImage",
 										 help = "Number of image to set as default")
+parser.add_argument ('--verbose', "-v", action = 'store_true', default = False, help = "Be verbose")
 parser.add_argument ('path', default = None, type = str, help = 'USB Drive Mountpoint')
 
 args = parser.parse_args ()
@@ -373,19 +347,28 @@ print "Using %s, mounted on %s" % (dev, args.path)
 # Go!
 s = Selector (dev, args.path)
 s.scan ()
+print "Slots in use: %d" % len (s.slots)
+print "Default slot: %d" % s.defaultSlot
+print
+
+if args.verbose:
+	print "Stat bytes:"
+	print "DEC:\t%d\t%d\t%d\t%d" % (s.stats.unk1, s.stats.unk2, s.stats.unk3, s.stats.unk4)
+	print "HEX:\t%02x\t%02x\t%02x\t%02x" % (s.stats.unk1, s.stats.unk2, s.stats.unk3, s.stats.unk4)
+	print
 
 if args.list:
 	for n, slot in s.slots.iteritems ():
 		print "%2d. %s" % (n, slot.diskFileName)
 elif args.check:
-	nProb = checkSlots ("/run/media/sukko/GOTEK", s.slots)
+	nProb = checkSlots (args.path, s.slots)
 	if nProb == 0:
 		print "Selector is safe and sound!"
 	#~ else:
 		#~ for slot in s.slots.itervalues ():
 			#~ s.updateSlot (slot)
 elif args.remap:
-	slots = remap (dev, mntp)
+	slots = remap (dev, args.path)
 	s.updateSlots (slots)
 elif args.defaultImage:
 	n = int (args.defaultImage)

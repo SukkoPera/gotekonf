@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 
+import sys
 import os
 import struct
 import subprocess
 import re
 import stat
 import fnmatch
-
-# TEMP
-import hashlib
+import argparse
 
 from collections import namedtuple
+
+from fat import FAT
 
 Stats = namedtuple ('Stats', ['nImages', 'defaultSlot'])
 
@@ -57,36 +58,35 @@ def findInPath (exe):
 	raise NotFoundInPathException (exe)
 
 class Fat32Filesystem (object):
-	@staticmethod
-	def getFileAtCluster (dev, mountp, clu):
-		rx = r"Found\s+(.+)\s+in\s+directory\s+(.+)\s+\(.+\)"
+	def __init__ (self, device, mountpoint):
+		self.device = device
+		self.mountpoint = mountpoint
+		self.fat = FAT (open (device, "rb"))
+		self.files = self.get_all_files ()
+		#~ for f in self.files:
+			#~ print f["name"], f["cluster"]
 
-		exe = findInPath ("fatcat")
-		cmd = [exe, dev, "-k", str (clu)]
-		#~ print "Running: %s" % str (cmd)
-		output = subprocess.check_output(cmd)
-		#~ print "Output is: %s" % output
-		rc = re.compile (rx)
+	def get_all_files (self, path="", skipDots = True):
+		files = self.fat.read_dir (path)
+		files2 = []
+		for f in files:
+			if f["name"] != "." and f["name"] != "..":
+				if len (path):
+					f["name"] = path + "/" + f["name"]
+				if f["attributes"] & FAT.Attribute.DIRECTORY:
+					#~ print "Recursing into '%s' - '%s'" % (f["name"], path)
+					files2.extend (self.get_all_files (f["name"]))
+				files2.append (f)
+			elif not skipDots:
+				files2.append (f)
+		return files2
 
-		ret = None
-		for line in output.split ('\n'):
-			match = rc.match (line)
-			if match is not None:
-				#~ print "OK %s" % str(match.groups ())
-				filename = match.group (1)
-				dir_ = match.group (2)
-
-				if filename[0] == "/":
-					filename = filename[1:]
-				path = os.path.join (mountp, filename)
-				#~ print "Trying %s" % path
-				if os.path.exists (path):
-					ret = filename
-					break
-				else:
-					#~ print "Found %s but does not exist" % path
-					pass
-
+	def getFileAtCluster (self, clu):
+		fn = filter (lambda f: f["cluster"] == clu, self.files)
+		if len (fn) == 1:
+			ret = fn[0]["name"]
+		else:
+			ret = None
 		return ret
 
 	@staticmethod
@@ -103,19 +103,6 @@ class Fat32Filesystem (object):
 		rc = re.compile (rx)
 
 		ret = None
-		for line in output.split ('\n'):
-			match = rc.match (line)
-			if match is not None:
-				#~ print "OK %s" % str(match.groups ())
-				date_ = match.group (1)
-				time_ = match.group (2)
-				filename = match.group (3)
-				cluster = int (match.group (4))
-				size = match.group (5)
-
-				if filename == bn:
-					ret = cluster
-					break
 
 		return ret
 
@@ -134,6 +121,7 @@ class Selector (object):
 	def __init__ (self, _dev, _mntp):
 		self.dev = _dev
 		self.mntp = _mntp
+		self.fs = Fat32Filesystem (_dev, _mntp)
 
 		self.adf = os.path.join (_mntp, "selector.adf")
 		if not os.path.isfile (self.adf):
@@ -173,10 +161,6 @@ class Selector (object):
 				raise SelectorException ("Read from selector.adf failed")
 
 			if buf[0] != '\0':
-				#~ if i == 3:
-					#~ print hexdump (buf)
-					#~ print hashlib.sha1 (buf).hexdigest ()
-
 				data = struct.unpack ("< 11s 2B 2I 41s 66B", buf)
 				shortName = data[0].rstrip ('\0')
 				unk1 = data[1]
@@ -185,7 +169,6 @@ class Selector (object):
 				fileSize = data[4]
 				fileName = data [5].rstrip ('\0')
 				zeros = data [6:]
-				print shortName, startCluster
 
 				# Some sanity checks, for what we understood the format
 				assert unk1 == 0
@@ -194,7 +177,7 @@ class Selector (object):
 
 				# Try to come up with actual file corresponding to cluster
 				# Will be None if not found
-				fn = Fat32Filesystem.getFileAtCluster (self.dev, self.mntp, startCluster)
+				fn = self.fs.getFileAtCluster (startCluster)
 
 				s = Slot (i, False, shortName, startCluster, fileSize, fileName, fn)
 				slots[i] = s
@@ -224,8 +207,6 @@ class Selector (object):
 			# struct.pack() will take care of padding and or shortening long/short strings
 			buf = struct.pack (Selector._SLOT_STRUCT, slot.shortName, 0, 0, slot.startCluster, slot.fileSize, slot.fileName, *([0] * 66))
 		offset = self._getSlotOffset (slot.num)
-		#~ print hexdump (buf)
-		#~ print hashlib.sha1 (buf).hexdigest ()
 		with open (self.adf, "rb+") as fp:
 			fp.seek (offset)
 			fp.write (buf)
@@ -267,6 +248,7 @@ def checkSlots (mntp, slots, fix = True):
 			candidates = findFile (slot.fileName, mntp)
 			candidates = map (lambda f: f[len (mntp) + 1:], candidates)
 			print "File for slot %d is missing: %s" % (n, slot.fileName)
+			print "File for slot %d is missing: %s" % (n, slot.startCluster)
 
 			# FIXME
 			if True or len (candidates) == 0:
@@ -334,23 +316,80 @@ def remap (dev, mntp):
 
 	return slots
 
-if __name__ == "__main__":
-	dev, mntp = ("/dev/sdc1", "/run/media/sukko/GOTEK")
-	s = Selector (dev, mntp)
-	s.scan ()
 
+# Thanks tzot ;)
+# https://stackoverflow.com/questions/4260116/find-size-and-free-space-of-the-filesystem-containing-a-given-file#12327880
+def get_mounted_device(pathname):
+	"Get the device mounted at pathname"
+	# uses "/proc/mounts"
+	if pathname.endswith ("/"):
+		pathname = pathname[:-1]
+	pathname= os.path.normcase(pathname) # might be unnecessary here
+	try:
+		with open("/proc/mounts", "r") as ifp:
+			for line in ifp:
+				fields= line.rstrip('\n').split()
+				# note that line above assumes that
+				# no mount points contain whitespace
+				if fields[1] == pathname:
+					return fields[0]
+	except EnvironmentError:
+		pass
+	return None # explicit
+
+parser = argparse.ArgumentParser (description = 'Manage disk images for Amiga Gotek drives')
+parser.add_argument ('--list', "-l", action = 'store_true', default = False, help = "List disk images")
+parser.add_argument ('--check', "-c", action = 'store_true', default = False, help = "Check disk images")
+parser.add_argument ('--remap', "-r", action = 'store_true', default = False, help = "Remap all disk images to slots")
+parser.add_argument ('--set-default', "-d", metavar = "IMAGE_NO", default = None, dest = "defaultImage",
+										 help = "Number of image to set as default")
+parser.add_argument ('path', default = None, type = str, help = 'USB Drive Mountpoint')
+
+args = parser.parse_args ()
+
+# This is ensured by argparse
+assert args.path is not None
+
+# Only accept one mode argument
+l = [args.list, args.check, args.remap, args.defaultImage]
+f = filter (lambda x: bool (x), l)
+if len (f) == 0:
+	print "No operation mode specified"
+	parser.print_help ()
+	sys.exit (10)
+elif len (f) > 1:
+	print "Please specify a single operation mode"
+	parser.print_help ()
+	sys.exit (10)
+
+# Find out device for mountpoint
+dev = get_mounted_device (args.path)
+if dev is None:
+	print "ERROR: Cannot find device mounted on %s" % args.path
+	sys.exit (20)
+
+print "Using %s, mounted on %s" % (dev, args.path)
+
+# Go!
+s = Selector (dev, args.path)
+s.scan ()
+
+if args.list:
 	for n, slot in s.slots.iteritems ():
 		print "%2d. %s" % (n, slot.diskFileName)
-
+elif args.check:
 	nProb = checkSlots ("/run/media/sukko/GOTEK", s.slots)
-	#~ if nProb == 0:
-		#~ print "Selector is safe and sound!"
+	if nProb == 0:
+		print "Selector is safe and sound!"
 	#~ else:
 		#~ for slot in s.slots.itervalues ():
 			#~ s.updateSlot (slot)
-
-	#~ s.setDefaultSlot (3)
+elif args.remap:
+	slots = remap (dev, mntp)
+	s.updateSlots (slots)
+elif args.defaultImage:
+	n = int (args.defaultImage)
+	s.setDefaultSlot (n)
+	print "Default image set to %d" % n
 	#~ s.updateSlot (s.slots[3])
 
-	#~ slots = remap (dev, mntp)
-	#~ s.updateSlots (slots)

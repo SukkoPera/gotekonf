@@ -273,14 +273,16 @@ def remap (sel, verbose = False):
 	slots = {}
 	for n, adf in enumerate (adfs, start = 1):
 		relpath = os.path.relpath (adf, sel.mountpoint)
-		print "%2d. %s" % (n, relpath)
+		print "%2d. %s" % (n, relpath),
 		bn = os.path.basename (adf)
 		sz = os.path.getsize (adf)
 		slot = Slot (n, False, bn, 0x00, sz, bn, relpath)
 		mapped = sel.mapSlot (slot)
 		assert mapped, "Cannot find cluster for file '%s'" % adf
 		if verbose:
-			print "- Mapped to cluster %u" % slot.startCluster
+			print "(c=%u)" % slot.startCluster
+		else:
+			print
 		slots[n] = slot
 
 	for n in range (len (adfs) + 1, Selector.MAX_SLOTS + 1):

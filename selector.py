@@ -13,7 +13,7 @@ from collections import namedtuple
 
 from fat import FAT
 
-Stats = namedtuple ('Stats', ['nImages', 'defaultSlot', 'unk1', 'unk2', 'unk3', 'unk4'])
+Stats = namedtuple ('Stats', ['nSlots', 'defaultSlot', 'unk1', 'unk2', 'unk3', 'unk4'])
 
 # cleared is True if slot should be cleared
 # diskFileName is actual path relative to device root (or None if not found),
@@ -113,13 +113,13 @@ class Selector (object):
 		fp.seek (Selector.STATS_OFFSET)
 		buf = fp.read (Selector.STATS_SIZE)
 		data = struct.unpack ("2H 4B", buf)
-		nImages = data[0]
+		nSlots = data[0]
 		defaultSlot = data[1]
 		unk1 = data[2]	# Went E5, F5...
 		unk2 = data[3]	# Always 01?
 		unk3 = data[4]
 		unk4 = data[5]
-		return Stats (nImages, defaultSlot, unk1, unk2, unk3, unk4)
+		return Stats (nSlots, defaultSlot, unk1, unk2, unk3, unk4)
 
 	def _getSlotOffset (self, n):
 		return Selector.REC_OFFSET + (n - 1) * Selector.REC_SIZE
@@ -165,15 +165,25 @@ class Selector (object):
 			self.stats = self._getStats (fp)
 			self.defaultSlot = self.stats.defaultSlot
 			self.slots = self._getSlots (fp)
+		assert self.stats.nSlots == len (self.slots)
 
 	def setDefaultSlot (self, slotNo):
 		if slotNo in self.slots:
 			with open (self.adf, "rb+") as fp:
 				fp.seek (Selector.STATS_OFFSET + 2)
-				s = struct.pack ("< B", slotNo)
+				s = struct.pack ("< H", slotNo)
 				fp.write (s)
 		else:
 			raise SelectorException ("Cannot set an empty slot as default")
+
+	def setNumSlots (self, nSlots):
+		if nSlots <= Selector.MAX_SLOTS:
+			with open (self.adf, "rb+") as fp:
+				fp.seek (Selector.STATS_OFFSET)
+				s = struct.pack ("< H", nSlots)
+				fp.write (s)
+		else:
+			raise SelectorException ("Invalid number of slots")
 
 	# Updates slot cluster according to slot filename
 	def mapSlot (self, slot):
@@ -261,6 +271,7 @@ def findFiles (pattern, root):
 		elif os.path.isfile (fullf) and fnmatch.fnmatch (f.lower (), pattern):
 			#~ print "Found: %s" % fullf
 			ret.append (fullf)
+	ret = sorted (ret)
 	for d in sorted (recurse):
 		ret.extend (findFiles (pattern, d))
 	return ret
@@ -292,6 +303,7 @@ def remap (sel, verbose = False):
 	# Commit
 	assert len (slots) == Selector.MAX_SLOTS, len (slots)
 	s.updateSlots (slots)
+	s.setNumSlots (len (adfs))
 
 
 # Thanks tzot ;)

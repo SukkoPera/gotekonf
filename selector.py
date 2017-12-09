@@ -376,7 +376,7 @@ if args.verbose:
 if args.list:
 	for n, slot in s.slots.iteritems ():
 		if args.verbose:
-			print "%2d. %s (c=%u)" % (n, slot.diskFileName, slot.cluster)
+			print "%2d. %s (c=%u)" % (n, slot.diskFileName, slot.startCluster)
 		else:
 			print "%2d. %s" % (n, slot.diskFileName)
 elif args.check:
